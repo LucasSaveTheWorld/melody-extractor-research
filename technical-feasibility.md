@@ -4,6 +4,91 @@
 
 ---
 
+## 0. Target Use Case: Chinese Vocal Melody → Piano Sheet Music
+
+### Use Case Definition
+
+The specific workflow this study targets:
+
+> **User uploads a Chinese pop song (华语流行) → app extracts the lead vocal melody → outputs a single-line piano sheet music (treble clef) the user can learn to play.**
+
+This is the most technically tractable version of the melody extraction problem, for reasons detailed below.
+
+### Why Vocal Melody Is the Easiest Case
+
+Human voice is **monophonic** — one note at a time. This means:
+- The hard problem of polyphonic pitch separation (multiple simultaneous notes) is avoided entirely
+- CREPE tiny, a 6 MB monophonic pitch tracker, is more accurate than any polyphonic transcription model at this task
+- The pipeline reduces to: **separate vocal stem → track single pitch → quantize to notes**
+
+### Recommended Pipeline
+
+```
+Chinese song (MP3 / AAC / WAV)
+         ↓
+  [Step 1] Demucs (4-stem separation)          ~83 MB Core ML model
+  → extract vocals stem (discard bass/drums/other)
+         ↓
+  [Step 2] CREPE tiny (monophonic pitch tracking)  ~6 MB Core ML model
+  → f0 contour: pitch in Hz, frame by frame
+         ↓
+  [Step 3] Rhythm quantizer (custom Swift)
+  → snap f0 to nearest musical note values (♩ ♪ 𝅘𝅥𝅯)
+  → detect note onsets and offsets
+  → assign MIDI pitch numbers
+         ↓
+  [Step 4] Sheet music renderer
+  → single-line treble clef piano staff
+  → scrolling piano roll or standard notation display
+```
+
+**Total bundled model size**: ~89 MB (well within iOS app size guidelines)
+
+### Advantages Specific to Chinese Pop (华语流行)
+
+| Factor | Why It Helps |
+|---|---|
+| Lead vocal is prominently mixed | Demucs separates it cleanly — Chinese pop production typically has vocals high in the mix |
+| Vocal melody is monophonic | CREPE tiny achieves 85–92% F1 on monophonic content |
+| Melody stays in a singable range (~C3–C6) | Fits naturally on a single treble clef staff without ledger line complexity |
+| Legato singing style common in 华语流行 | Cleaner onset detection vs. highly melismatic or ornamented styles |
+| Relatively clean studio productions | Less bleed between stems than live recordings |
+
+### Honest Limitations for This Use Case
+
+| Challenge | Severity | What Happens in Practice |
+|---|---|---|
+| Vibrato / pitch slides (滑音) | Medium | CREPE tracks the center pitch well; slides become a held note at the average pitch |
+| 装饰音 (grace notes, ornaments) | Medium | Fast ornaments below ~100ms are typically dropped or merged into the main note |
+| Rhythm quantization | Medium–High | Singers never sing exactly on the beat; the quantizer approximates to the nearest 16th note — output feels slightly mechanical |
+| Harmony vocals / double-tracking | Low–Medium | If backing vocals are close in level to the lead, they bleed into the vocal stem and create spurious pitch detections |
+| Demucs Core ML conversion | Medium | Community ports exist; expect 1–2 weeks of conversion and validation work |
+| Rap / spoken-word sections | High | Pitch tracking is unreliable on rap; recommend detecting low-confidence sections and leaving them blank |
+
+**Expected output quality for a typical Chinese pop ballad**: ~80–90% of notes correct for simple, legato vocal lines. Ornaments and rapid passages will be simplified. The result is recognizable and learnable on piano, not a professional-grade transcription.
+
+### Build Complexity for This Specific Use Case
+
+| Task | Effort |
+|---|---|
+| Demucs → Core ML conversion + validation | 1–2 weeks |
+| CREPE tiny → Core ML conversion | 3–5 days |
+| AVFoundation audio pipeline (file import, resampling) | 2–3 days |
+| CREPE inference on vocal stem | 2–3 days |
+| f0 → note event post-processing (onset detection, quantization) | 1–2 weeks |
+| Piano sheet music renderer (SwiftUI, treble clef) | 2–3 weeks |
+| File picker UI + progress flow | 3–5 days |
+| Testing on real Chinese pop songs | 1–2 weeks |
+| **Total (1 engineer)** | **~7–12 weeks** |
+
+### Verdict
+
+**Feasible. Recommended approach for MVP.**
+
+The vocal melody use case is the right starting scope because it avoids the hardest part of the general problem (polyphonic separation of arbitrary instruments) while directly serving the stated user need. Chinese pop music's production characteristics — prominent, clean lead vocals, moderate tempo, legato phrasing — are favorable for this pipeline. The two required models (Demucs + CREPE tiny) are open-source, well-documented, and have community precedent for Core ML conversion.
+
+---
+
 ## 1. ML Models for Melody Extraction / Music Transcription
 
 ### 1.1 Basic Pitch (Spotify Research)
@@ -102,13 +187,13 @@ Poor to moderate:
 A CNN + Transformer hybrid focused on piano. Model size ~18 MB (the CNN-only variant). Very accurate for piano (F1 ~90%+ on MAPS). Core ML conversion is feasible — the model is relatively clean PyTorch. However, it is **piano-only**, not suitable for general melody from arbitrary instruments.
 
 #### CREPE (monophonic pitch tracker)
-CREPE is a CNN-based monophonic pitch tracker (not a full transcription model — it outputs f0 contours, not MIDI notes). The full model is ~130 MB but a "tiny" variant is ~6 MB. CREPE is excellent at tracking a single dominant pitch (voice, lead instrument) with very high accuracy on monophonic content. **This is likely the easiest path to a Core ML model for single-melody tracking.** The tiny model can be converted to Core ML straightforwardly and runs in real time on iPhone.
+CREPE is a CNN-based monophonic pitch tracker (not a full transcription model — it outputs f0 contours, not MIDI notes). The full model is ~130 MB but a "tiny" variant is ~6 MB. CREPE is excellent at tracking a single dominant pitch (voice, lead instrument) with very high accuracy on monophonic content. **This is the recommended model for the vocal melody use case.** The tiny model can be converted to Core ML straightforwardly and runs in real time on iPhone.
 
 #### PESTO (2023)
 A self-supervised pitch estimation model (ICASSP 2023). Smaller and faster than CREPE with competitive accuracy on monophonic content. PyTorch-based, Core ML conversion is feasible.
 
 #### Demucs + CREPE (hybrid pipeline)
-A common practical approach: use Demucs (source separation, ~83 MB for the 4-stem model) to isolate the melody instrument from a mix, then run CREPE on the isolated stem for pitch tracking. Two-stage pipeline with higher total model size (~90–140 MB combined) but excellent accuracy for real-world mixed audio.
+**The recommended pipeline for the target use case.** Use Demucs (source separation, ~83 MB for the 4-stem model) to isolate the vocal stem from a mix, then run CREPE tiny on the isolated vocal for pitch tracking. Two-stage pipeline with ~89 MB total model size and excellent accuracy for real-world Chinese pop recordings.
 
 ---
 
@@ -122,7 +207,9 @@ A common practical approach: use Demucs (source separation, ~83 MB for the 4-ste
 | Bytedance Piano | ~18 MB | 1–3s | ~90% (piano only) | Medium | MIT |
 | Omnizart | 30–150 MB | 5–15s | 75–85% | High | MIT |
 | MT3 | 200–500 MB | 15–60s+ | 85–92% (multi-inst.) | Very High | Apache 2.0 |
-| Demucs + CREPE | ~90–140 MB | 3–8s | 85–90% (practical) | High | MIT |
+| **Demucs + CREPE** ⭐ | **~89 MB** | **3–8s** | **85–90% (vocal)** | **High** | **MIT / Apache 2.0** |
+
+⭐ Recommended for target use case
 
 ---
 
@@ -218,7 +305,21 @@ Best for non-real-time "import a song" flows.
 
 ## 5. Build Complexity Estimates
 
-### Scenario A: Basic Pitch on-device (MVP)
+### Scenario A: Vocal melody → piano sheet (target use case) ⭐
+
+| Task | Effort |
+|---|---|
+| Demucs → Core ML conversion + validation | 1–2 weeks |
+| CREPE tiny → Core ML conversion | 3–5 days |
+| AVFoundation audio pipeline (file import, resampling) | 2–3 days |
+| CREPE inference on vocal stem | 2–3 days |
+| f0 → note event post-processing (onset detection, quantization) | 1–2 weeks |
+| Piano sheet music renderer (SwiftUI, treble clef) | 2–3 weeks |
+| File picker UI + progress flow | 3–5 days |
+| Testing on real Chinese pop songs | 1–2 weeks |
+| **Total (1 engineer)** | **~7–12 weeks** |
+
+### Scenario B: Basic Pitch on-device (polyphonic MVP)
 
 | Task | Effort |
 |---|---|
@@ -231,16 +332,6 @@ Best for non-real-time "import a song" flows.
 | Testing, tuning, edge cases | 1–2 weeks |
 | **Total (1 engineer)** | **~8–14 weeks** |
 
-### Scenario B: CREPE tiny — monophonic, real-time
-
-| Task | Effort |
-|---|---|
-| Core ML conversion | 3–5 days |
-| Audio pipeline + preprocessing | 1 week |
-| f0 → MIDI note post-processing | 3–5 days |
-| UI | 1–2 weeks |
-| **Total (1 engineer)** | **~5–8 weeks** |
-
 ### Scenario C: Hybrid (CREPE on-device + MT3 cloud)
 
 Add 2–4 weeks for cloud backend. Total: **10–18 weeks**.
@@ -251,9 +342,10 @@ Add 2–4 weeks for cloud backend. Total: **10–18 weeks**.
 
 1. **Mel spectrogram parameter mismatch** — most common source of silent accuracy degradation
 2. **Core ML op compatibility** — certain ops may not convert cleanly; custom layers are labor-intensive
-3. **Polyphonic accuracy ceiling** — Basic Pitch at 70–80% F1 means ~1 in 4 notes wrong or missed
-4. **Real-time latency** — minimum chunk size ~46ms per chunk at 22,050 Hz
-5. **License compliance** — Basic Pitch (Apache 2.0) and CREPE (MIT) allow commercial use; verify before shipping
+3. **Rhythm quantization quality** — converting a human vocal performance to quantized notation always loses expressiveness; managing user expectations is as important as the algorithm
+4. **Demucs vocal bleed** — backing vocals and reverb tails bleed into the vocal stem; post-processing (e.g., confidence thresholding on CREPE output) can reduce spurious notes
+5. **Rap / spoken-word sections** — pitch tracking breaks down; detect low-confidence regions and leave them blank rather than producing wrong notes
+6. **License compliance** — Demucs (MIT) and CREPE (MIT) allow commercial use; verify before shipping
 
 ---
 
@@ -261,8 +353,9 @@ Add 2–4 weeks for cloud backend. Total: **10–18 weeks**.
 
 | Use Case | Recommended Approach |
 |---|---|
-| Single melody (voice or lead instrument) | **CREPE tiny** — smallest, most accurate for monophonic, easiest Core ML conversion |
+| **Chinese vocal melody → piano sheet** ⭐ | **Demucs (vocal stem) + CREPE tiny** — most accurate for the stated use case, all on-device, ~89 MB total |
+| Single melody (any monophonic instrument) | **CREPE tiny** alone if input is already a clean recording |
 | Polyphonic / chord-aware transcription | **Basic Pitch** — best balance of size, accuracy, and conversion feasibility |
 | Maximum accuracy (async, non-real-time) | **Hybrid: CREPE on-device + MT3 cloud** |
 
-**Avoid for iOS**: MT3 on-device (too large/slow), Omnizart (preprocessing complexity), Demucs standalone (adds scope without clear benefit over CREPE).
+**Avoid for iOS**: MT3 on-device (too large/slow), Omnizart (preprocessing complexity), Basic Pitch alone on full-mix audio (no stem separation step means poor accuracy on typical pop productions).
